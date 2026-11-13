@@ -1,0 +1,1 @@
+# TODO: bookings custom permissions
