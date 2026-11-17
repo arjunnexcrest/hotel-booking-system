@@ -1,3 +1,12 @@
 from django.db import models
 
-# TODO: define core models during DB design phase
+
+class TimeStampedModel(models.Model):
+    """
+    Abstract base class providing self-updating created_at and updated_at fields.
+    """
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        abstract = True
