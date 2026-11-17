@@ -1,9 +1,11 @@
-from django.urls import path
+from django.urls import path, include
 from rest_framework.routers import DefaultRouter
+from .views import BookingViewSet, BookingHistoryViewSet
 
 router = DefaultRouter()
-# TODO: register bookings viewsets
+router.register('bookings', BookingViewSet, basename='booking')
+router.register('history', BookingHistoryViewSet, basename='booking-history')
 
 urlpatterns = [
-    # path('', include(router.urls)),
+    path('', include(router.urls)),
 ]
