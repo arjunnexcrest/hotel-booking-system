@@ -8,6 +8,8 @@ from .serializers import (
     HotelDocumentSerializer,
     HotelApprovalSerializer,
 )
+from core.permissions import IsSuperAdmin, IsOwnerOrAdminOrReadOnly
+from accounts.models import HotelMembership
 
 
 class HotelViewSet(viewsets.ModelViewSet):
@@ -20,12 +22,23 @@ class HotelViewSet(viewsets.ModelViewSet):
     def get_permissions(self):
         if self.action in ['list', 'retrieve']:
             return [permissions.AllowAny()]
-        return [permissions.IsAuthenticated()]
+        if self.action == 'create':
+            return [permissions.IsAuthenticated()]
+        if self.action in ['approve', 'reject']:
+            return [IsSuperAdmin()]
+        return [IsOwnerOrAdminOrReadOnly()]
 
     def perform_create(self, serializer):
-        serializer.save(owner=self.request.user)
+        hotel = serializer.save(owner=self.request.user)
+        # Automatically assign owner membership for multi-tenant isolation
+        HotelMembership.objects.get_or_create(
+            user=self.request.user,
+            hotel=hotel,
+            role=HotelMembership.MembershipRole.OWNER,
+            defaults={'is_active': True}
+        )
 
-    @action(detail=True, methods=['post'], permission_classes=[permissions.IsAdminUser])
+    @action(detail=True, methods=['post'], permission_classes=[IsSuperAdmin])
     def approve(self, request, slug=None):
         hotel = self.get_object()
         hotel.status = Hotel.Status.APPROVED
@@ -38,7 +51,7 @@ class HotelViewSet(viewsets.ModelViewSet):
         )
         return Response({'status': 'Hotel approved', 'approval_id': approval.id})
 
-    @action(detail=True, methods=['post'], permission_classes=[permissions.IsAdminUser])
+    @action(detail=True, methods=['post'], permission_classes=[IsSuperAdmin])
     def reject(self, request, slug=None):
         hotel = self.get_object()
         reason = request.data.get('reason', '')

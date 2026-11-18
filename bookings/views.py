@@ -4,6 +4,7 @@ from rest_framework.response import Response
 from django.utils import timezone
 from .models import Booking, BookingHistory
 from .serializers import BookingSerializer, BookingHistorySerializer
+from .services.booking_service import BookingService
 
 
 class BookingViewSet(viewsets.ModelViewSet):
@@ -13,9 +14,27 @@ class BookingViewSet(viewsets.ModelViewSet):
     search_fields = ['booking_reference', 'customer_name', 'customer_email', 'customer_phone']
 
     def get_permissions(self):
-        if self.action == 'create':
+        if self.action in ['create', 'check_availability']:
             return [permissions.AllowAny()]
         return [permissions.IsAuthenticated()]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        user = self.request.user
+        if not user or not user.is_authenticated:
+            return qs.none() if self.action == 'list' else qs
+
+        if user.role == 'super_admin' or user.is_superuser:
+            return qs
+
+        if user.role in ['hotel_owner', 'hotel_admin', 'staff']:
+            hotel_ids = user.hotel_memberships.filter(is_active=True).values_list('hotel_id', flat=True)
+            return qs.filter(hotel_id__in=hotel_ids)
+
+        if user.role == 'customer':
+            return qs.filter(customer=user)
+
+        return qs
 
     def perform_create(self, serializer):
         user = self.request.user if self.request.user.is_authenticated else None
