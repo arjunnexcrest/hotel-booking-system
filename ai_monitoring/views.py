@@ -28,13 +28,47 @@ class AIEventViewSet(viewsets.ModelViewSet):
     search_fields = ['source_event_id', 'model_name']
 
     def create(self, request, *args, **kwargs):
-        source_id = request.data.get('source_event_id')
-        if source_id and AIEvent.objects.filter(source_event_id=source_id).exists():
-            return Response(
-                {'detail': 'Event with this source_event_id has already been processed.'},
-                status=status.HTTP_200_OK
-            )
-        return super().create(request, *args, **kwargs)
+        from .services.ai_service import AIService
+        from hotels.models import Hotel
+        from restaurants.models import Restaurant
+        from tables.models import RestaurantTable
+        from .models import Camera
+
+        data = request.data
+        source_id = data.get('source_event_id')
+        if not source_id:
+            return Response({'error': 'source_event_id is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            hotel = Hotel.objects.get(id=data.get('hotel'))
+            restaurant = Restaurant.objects.get(id=data.get('restaurant'))
+        except (Hotel.DoesNotExist, Restaurant.DoesNotExist) as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+        table = None
+        if data.get('table'):
+            table = RestaurantTable.objects.filter(id=data.get('table')).first()
+
+        camera = None
+        if data.get('camera'):
+            camera = Camera.objects.filter(id=data.get('camera')).first()
+
+        event, is_new = AIService.process_incoming_event(
+            hotel=hotel,
+            restaurant=restaurant,
+            table=table,
+            camera=camera,
+            source_event_id=source_id,
+            event_type=data.get('event_type'),
+            confidence_score=float(data.get('confidence_score', 0.8)),
+            model_name=data.get('model_name', 'yolo-table-monitor'),
+            model_version=data.get('model_version', 'v1.0'),
+            raw_payload=data.get('raw_payload', {})
+        )
+
+        serializer = self.get_serializer(event)
+        status_code = status.HTTP_201_CREATED if is_new else status.HTTP_200_OK
+        return Response(serializer.data, status=status_code)
 
 
 class ServiceAlertViewSet(viewsets.ModelViewSet):
