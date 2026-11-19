@@ -39,6 +39,11 @@ class Restaurant(TimeStampedModel):
     )
     phone_number = models.CharField(max_length=30, blank=True)
     email = models.EmailField(blank=True)
+    turnover_buffer_minutes = models.PositiveSmallIntegerField(default=15)
+    min_reservation_duration = models.PositiveSmallIntegerField(default=45)
+    max_reservation_duration = models.PositiveSmallIntegerField(default=180)
+    min_advance_minutes = models.PositiveSmallIntegerField(default=30)
+    max_advance_days = models.PositiveSmallIntegerField(default=60)
     is_active = models.BooleanField(default=True)
 
     class Meta:

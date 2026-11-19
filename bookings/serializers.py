@@ -125,36 +125,53 @@ class BookingSerializer(serializers.ModelSerializer):
                 "restaurant": f"Reservations unavailable: Restaurant '{restaurant.name}' is currently inactive."
             })
 
-        # Validate operating hours
+        # Validate time, advance notice, duration, operating hours & kitchen cutoff
         if restaurant and booking_date and start_time and end_time:
             try:
-                BookingService.validate_operating_hours(restaurant, booking_date, start_time, end_time)
+                BookingService.validate_reservation_time(restaurant, booking_date, start_time, end_time)
             except DjangoValidationError as e:
-                raise serializers.ValidationError({"operating_hours": str(e)})
+                raise serializers.ValidationError({"time": str(e)})
 
-        # If explicit table specified, check capacity and conflict
+        # Customer anti-spam / simultaneous overlapping booking check
+        request = self.context.get('request')
+        user = request.user if request and request.user.is_authenticated else None
+        customer_email = data.get('customer_email') or (user.email if user else None)
+        if booking_date and start_time and end_time and (user or customer_email):
+            if BookingService.check_customer_conflict(
+                customer=user,
+                customer_email=customer_email,
+                booking_date=booking_date,
+                start_time=start_time,
+                end_time=end_time,
+                exclude_booking_id=self.instance.id if self.instance else None
+            ):
+                raise serializers.ValidationError({"customer": "You already have an active reservation for an overlapping time slot."})
+
+        # If explicit table specified, check operational status, capacity boundaries, and buffer-aware conflict
         if table:
             if not table.is_active or table.operational_status in [RestaurantTable.OperationalStatus.MAINTENANCE, RestaurantTable.OperationalStatus.TEMPORARILY_BLOCKED]:
                 raise serializers.ValidationError({
                     "table": f"Table {table.table_number} is currently out of service or inactive."
                 })
 
-            if guest_count > table.capacity:
-                raise serializers.ValidationError({
-                    "guest_count": f"Guest count ({guest_count}) exceeds table capacity ({table.capacity})."
-                })
+            try:
+                BookingService.validate_capacity(table, guest_count)
+            except DjangoValidationError as e:
+                raise serializers.ValidationError({"guest_count": str(e)})
 
             if booking_date and start_time and end_time:
+                buffer_mins = restaurant.turnover_buffer_minutes if restaurant else 0
                 conflicting = BookingService.check_table_conflict(
                     table.id,
                     booking_date,
                     start_time,
                     end_time,
+                    buffer_minutes=buffer_mins,
                     exclude_booking_id=self.instance.id if self.instance else None
                 )
                 if conflicting:
                     raise serializers.ValidationError({
-                        "table": f"Table {table.table_number} already has a conflicting reservation for this time slot."
+                        "table": f"Table {table.table_number} already has a conflicting reservation or is in turnover cleaning during this time slot."
                     })
 
         return data
