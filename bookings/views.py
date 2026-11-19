@@ -137,38 +137,58 @@ class BookingViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # 1. Base candidate tables - enforce public visibility rules
-        candidates = RestaurantTable.objects.filter(
+        # 1. Base candidate tables - enforce public visibility and min/max capacity boundaries
+        from restaurants.models import Restaurant
+        try:
+            restaurant = Restaurant.objects.get(id=restaurant_id)
+            buffer_mins = restaurant.turnover_buffer_minutes
+        except Restaurant.DoesNotExist:
+            buffer_mins = 15
+
+        candidates = list(RestaurantTable.objects.filter(
             restaurant_id=restaurant_id,
             restaurant__is_active=True,
             restaurant__hotel__status='APPROVED',
             restaurant__hotel__is_active=True,
             is_active=True,
             capacity__gte=guests,
+            min_capacity__lte=guests,
             operational_status__in=[
                 RestaurantTable.OperationalStatus.AVAILABLE,
                 RestaurantTable.OperationalStatus.OCCUPIED,
                 RestaurantTable.OperationalStatus.AWAITING_CLEANING,
             ]
-        )
+        ).order_by('capacity', 'table_number'))
+
         if zone_name:
-            candidates = candidates.filter(zone_name__iexact=zone_name.strip())
+            candidates = [t for t in candidates if t.zone_name.strip().lower() == zone_name.strip().lower()]
 
-        # 2. Find tables booked during overlapping interval [start_time, end_time)
-        conflicting_booking_statuses = [
-            Booking.BookingStatus.PENDING,
-            Booking.BookingStatus.CONFIRMED,
-            Booking.BookingStatus.CHECKED_IN,
-        ]
-        booked_table_ids = Booking.objects.filter(
+        # 2. Find tables booked during overlapping interval considering turnover cleaning buffer
+        try:
+            b_date_obj = datetime.strptime(booking_date, '%Y-%m-%d').date()
+            s_time_obj = datetime.strptime(start_time, '%H:%M:%S' if len(start_time) == 8 else '%H:%M').time()
+            e_time_obj = datetime.strptime(end_time, '%H:%M:%S' if len(end_time) == 8 else '%H:%M').time()
+        except ValueError:
+            return Response({'error': 'Invalid date or time format.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        new_start_dt = datetime.combine(b_date_obj, s_time_obj)
+        new_end_dt = datetime.combine(b_date_obj, e_time_obj)
+        buffer_delta = timedelta(minutes=buffer_mins)
+
+        day_bookings = list(Booking.objects.filter(
             restaurant_id=restaurant_id,
-            booking_date=booking_date,
-            booking_status__in=conflicting_booking_statuses,
-            start_time__lt=end_time,
-            end_time__gt=start_time,
-        ).values_list('table_id', flat=True)
+            booking_date=b_date_obj,
+            booking_status__in=['PENDING', 'CONFIRMED', 'CHECKED_IN']
+        ).values('table_id', 'start_time', 'end_time'))
 
-        available_tables = candidates.exclude(id__in=booked_table_ids).order_by('capacity', 'table_number')
+        booked_table_ids = set()
+        for b in day_bookings:
+            b_start_dt = datetime.combine(b_date_obj, b['start_time'])
+            b_end_dt = datetime.combine(b_date_obj, b['end_time'])
+            if new_start_dt < (b_end_dt + buffer_delta) and (new_end_dt + buffer_delta) > b_start_dt:
+                booked_table_ids.add(b['table_id'])
+
+        available_tables = [t for t in candidates if t.id not in booked_table_ids]
         serializer = RestaurantTableSerializer(available_tables, many=True)
         return Response({
             'date': booking_date,

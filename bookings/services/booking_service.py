@@ -44,10 +44,12 @@ def _send_notification(recipient, hotel, title, message, notif_type):
 
 class BookingService:
     @staticmethod
-    def check_table_conflict(table_id, booking_date, start_time, end_time, exclude_booking_id=None):
+    def check_table_conflict(table_id, booking_date, start_time, end_time, buffer_minutes=0, exclude_booking_id=None):
         """
-        Evaluates overlapping reservations using half-open time intervals [start_time, end_time).
-        A booking ending at 7:00 PM does not conflict with one starting at 7:00 PM.
+        Evaluates overlapping reservations using buffer-aware time intervals.
+        Between reservation A and reservation B:
+        Conflict exists if:
+            new_start < (existing_end + buffer) AND (new_end + buffer) > existing_start
         """
         active_statuses = [
             Booking.BookingStatus.PENDING,
@@ -55,69 +57,171 @@ class BookingService:
             Booking.BookingStatus.CHECKED_IN,
         ]
 
-        query = Booking.objects.filter(
+        existing_bookings = Booking.objects.filter(
             table_id=table_id,
+            booking_date=booking_date,
+            booking_status__in=active_statuses,
+        )
+        if exclude_booking_id:
+            existing_bookings = existing_bookings.exclude(id=exclude_booking_id)
+
+        new_start_dt = datetime.combine(booking_date, start_time)
+        new_end_dt = datetime.combine(booking_date, end_time)
+        buffer_delta = timedelta(minutes=buffer_minutes)
+
+        for b in existing_bookings:
+            b_start_dt = datetime.combine(booking_date, b.start_time)
+            b_end_dt = datetime.combine(booking_date, b.end_time)
+
+            # Check overlap considering turnover cleaning buffer
+            if new_start_dt < (b_end_dt + buffer_delta) and (new_end_dt + buffer_delta) > b_start_dt:
+                return True
+
+        return False
+
+    @staticmethod
+    def check_customer_conflict(customer, customer_email, booking_date, start_time, end_time, exclude_booking_id=None):
+        """
+        Prevents a customer from holding simultaneous overlapping reservations across tables.
+        """
+        active_statuses = [
+            Booking.BookingStatus.PENDING,
+            Booking.BookingStatus.CONFIRMED,
+            Booking.BookingStatus.CHECKED_IN,
+        ]
+        q = models.Q()
+        if customer and customer.is_authenticated:
+            q |= models.Q(customer=customer)
+        if customer_email:
+            q |= models.Q(customer_email__iexact=customer_email.strip())
+
+        if not q:
+            return False
+
+        existing = Booking.objects.filter(
+            q,
             booking_date=booking_date,
             booking_status__in=active_statuses,
             start_time__lt=end_time,
             end_time__gt=start_time,
         )
-
         if exclude_booking_id:
-            query = query.exclude(id=exclude_booking_id)
+            existing = existing.exclude(id=exclude_booking_id)
 
-        return query.exists()
+        return existing.exists()
 
     @staticmethod
-    def validate_operating_hours(restaurant, booking_date, start_time, end_time):
+    def validate_capacity(table, guest_count):
         """
-        Validates that the reservation falls within restaurant operating hours and not on closure dates.
+        Enforces both maximum capacity and minimum capacity boundaries.
         """
-        # Ensure parent hotel is approved and active
+        if guest_count < 1:
+            raise ValidationError("Party size must be at least 1 guest.")
+        if guest_count > table.capacity:
+            raise ValidationError(
+                f"Party size ({guest_count}) exceeds capacity of Table {table.table_number} ({table.capacity} guests)."
+            )
+        if guest_count < table.min_capacity:
+            raise ValidationError(
+                f"Table {table.table_number} requires a minimum party size of {table.min_capacity} guests."
+            )
+
+    @staticmethod
+    def validate_reservation_time(restaurant, booking_date, start_time, end_time):
+        """
+        Rigorous time validations:
+        1. End time must be after start time.
+        2. Hotel must be approved and active; restaurant must be active.
+        3. Reservation cannot be in the past; same-day bookings must meet min_advance_minutes.
+        4. Advance horizon <= max_advance_days.
+        5. Duration is within [min_reservation_duration, max_reservation_duration].
+        6. Within operating hours and not on closure dates.
+        7. Kitchen cutoff: start_time <= closing_time - min_reservation_duration.
+        """
+        if start_time >= end_time:
+            raise ValidationError("End time must be after start time.")
+
+        # 1. Hotel approval & restaurant active
         if restaurant.hotel.status != Hotel.Status.APPROVED or not restaurant.hotel.is_active:
             raise ValidationError(f"Reservations are unavailable: '{restaurant.hotel.name}' is currently not approved or inactive.")
 
         if not restaurant.is_active:
             raise ValidationError(f"'{restaurant.name}' is currently inactive.")
 
-        # Check special closures
+        # 2. Advance & Past Time Validation
+        now_dt = timezone.localtime()
+        today = now_dt.date()
+
+        if booking_date < today:
+            raise ValidationError("Cannot make reservations in the past.")
+
+        max_allowed_date = today + timedelta(days=restaurant.max_advance_days)
+        if booking_date > max_allowed_date:
+            raise ValidationError(f"Reservations can only be booked up to {restaurant.max_advance_days} days in advance.")
+
+        # Same-day advance notice
+        if booking_date == today:
+            tz = timezone.get_current_timezone()
+            start_dt = timezone.make_aware(datetime.combine(booking_date, start_time), tz)
+            min_notice_dt = now_dt + timedelta(minutes=restaurant.min_advance_minutes)
+            if start_dt < min_notice_dt:
+                raise ValidationError(f"Reservations must be made at least {restaurant.min_advance_minutes} minutes in advance.")
+
+        # 3. Duration Limits
+        duration_mins = (datetime.combine(booking_date, end_time) - datetime.combine(booking_date, start_time)).total_seconds() / 60
+        if duration_mins < restaurant.min_reservation_duration:
+            raise ValidationError(
+                f"Reservation duration ({int(duration_mins)} mins) is below the minimum allowed ({restaurant.min_reservation_duration} mins)."
+            )
+        if duration_mins > restaurant.max_reservation_duration:
+            raise ValidationError(
+                f"Reservation duration ({int(duration_mins)} mins) exceeds the maximum allowed ({restaurant.max_reservation_duration} mins)."
+            )
+
+        # 4. Special Closures
         closure = SpecialClosure.objects.filter(restaurant=restaurant, closure_date=booking_date).first()
         if closure:
             if closure.is_all_day:
                 raise ValidationError(f"{restaurant.name} is closed on {booking_date} ({closure.reason}).")
             if closure.start_time and closure.end_time:
-                # If reservation overlaps with closure interval
                 if start_time < closure.end_time and end_time > closure.start_time:
                     raise ValidationError(f"{restaurant.name} is closed between {closure.start_time} and {closure.end_time} ({closure.reason}).")
 
-        day_of_week = booking_date.weekday() # 0 = Monday
+        # 5. Operating Hours
+        day_of_week = booking_date.weekday()
         hours = OperatingHours.objects.filter(restaurant=restaurant, day_of_week=day_of_week).first()
-        if hours:
-            if hours.is_closed:
-                raise ValidationError(f"{restaurant.name} is closed on this day of the week ({hours.get_day_of_week_display()}).")
-            if start_time < hours.opening_time or end_time > hours.closing_time:
-                raise ValidationError(
-                    f"Reservation must be within restaurant operating hours ({hours.opening_time} - {hours.closing_time})."
-                )
+        if not hours or hours.is_closed:
+            day_name = hours.get_day_of_week_display() if hours else booking_date.strftime('%A')
+            raise ValidationError(f"{restaurant.name} is closed on {day_name}.")
+
+        if start_time < hours.opening_time or end_time > hours.closing_time:
+            raise ValidationError(
+                f"Reservation must be within restaurant operating hours ({hours.opening_time} - {hours.closing_time})."
+            )
+
+        # 6. Kitchen Cutoff
+        kitchen_cutoff_dt = datetime.combine(booking_date, hours.closing_time) - timedelta(minutes=restaurant.min_reservation_duration)
+        if start_time > kitchen_cutoff_dt.time():
+            raise ValidationError(
+                f"Latest seating is at {kitchen_cutoff_dt.strftime('%H:%M')} to allow for minimum dining duration before closing."
+            )
 
     @classmethod
     def get_available_slots(cls, restaurant_id, booking_date, guest_count=2, duration_minutes=90):
         """
-        Calculates 30-minute reservation slots during restaurant operating hours on a given date.
-        Returns slots with available table count and recommendation flags.
+        Calculates 30-minute reservation slots during restaurant operating hours on a given date,
+        factoring in table turnover buffers.
         """
         try:
             restaurant = Restaurant.objects.select_related('hotel').get(id=restaurant_id)
         except Restaurant.DoesNotExist:
             raise ValidationError("Restaurant not found.")
 
-        # Check hotel approval and active status
         if restaurant.hotel.status != Hotel.Status.APPROVED or not restaurant.hotel.is_active:
             return []
         if not restaurant.is_active:
             return []
 
-        # Check special closure
         closure = SpecialClosure.objects.filter(restaurant=restaurant, closure_date=booking_date).first()
         if closure and closure.is_all_day:
             return []
@@ -127,11 +231,12 @@ class BookingService:
         if not hours or hours.is_closed:
             return []
 
-        # Candidate active tables with capacity
+        # Candidate active tables fitting capacity boundaries
         candidate_tables = list(RestaurantTable.objects.filter(
             restaurant=restaurant,
             is_active=True,
             capacity__gte=guest_count,
+            min_capacity__lte=guest_count,
             operational_status__in=[
                 RestaurantTable.OperationalStatus.AVAILABLE,
                 RestaurantTable.OperationalStatus.OCCUPIED,
@@ -141,7 +246,6 @@ class BookingService:
         if not candidate_tables:
             return []
 
-        # Generate slots every 30 minutes from opening_time up to closing_time - duration
         slots = []
         open_dt = datetime.combine(booking_date, hours.opening_time)
         close_dt = datetime.combine(booking_date, hours.closing_time)
@@ -149,40 +253,44 @@ class BookingService:
 
         curr_dt = open_dt
         now_dt = timezone.localtime()
-
-        active_statuses = [
-            Booking.BookingStatus.PENDING,
-            Booking.BookingStatus.CONFIRMED,
-            Booking.BookingStatus.CHECKED_IN,
-        ]
+        buffer_mins = restaurant.turnover_buffer_minutes
 
         # Prefetch day's bookings
         day_bookings = list(Booking.objects.filter(
             restaurant=restaurant,
             booking_date=booking_date,
-            booking_status__in=active_statuses
+            booking_status__in=[Booking.BookingStatus.PENDING, Booking.BookingStatus.CONFIRMED, Booking.BookingStatus.CHECKED_IN]
         ).values('table_id', 'start_time', 'end_time'))
 
         while curr_dt + slot_duration <= close_dt:
             slot_start = curr_dt.time()
             slot_end = (curr_dt + slot_duration).time()
 
-            # Skip past slots if booking for today (compare naive local datetimes safely)
-            if booking_date == now_dt.date() and curr_dt < now_dt.replace(tzinfo=None):
-                curr_dt += timedelta(minutes=30)
-                continue
+            # Skip past or non-advance slots if booking for today
+            if booking_date == now_dt.date():
+                tz = timezone.get_current_timezone()
+                slot_aware = timezone.make_aware(curr_dt, tz)
+                if slot_aware < now_dt + timedelta(minutes=restaurant.min_advance_minutes):
+                    curr_dt += timedelta(minutes=30)
+                    continue
 
-            # Check closure time overlap if any
+            # Check closure time overlap
             if closure and closure.start_time and closure.end_time:
                 if slot_start < closure.end_time and slot_end > closure.start_time:
                     curr_dt += timedelta(minutes=30)
                     continue
 
-            # Count unreserved tables for this slot
-            booked_tables_in_slot = {
-                b['table_id'] for b in day_bookings
-                if b['start_time'] < slot_end and b['end_time'] > slot_start
-            }
+            # Count unreserved tables considering turnover buffer
+            slot_start_dt = curr_dt
+            slot_end_dt = curr_dt + slot_duration
+            buffer_delta = timedelta(minutes=buffer_mins)
+
+            booked_tables_in_slot = set()
+            for b in day_bookings:
+                b_start_dt = datetime.combine(booking_date, b['start_time'])
+                b_end_dt = datetime.combine(booking_date, b['end_time'])
+                if slot_start_dt < (b_end_dt + buffer_delta) and (slot_end_dt + buffer_delta) > b_start_dt:
+                    booked_tables_in_slot.add(b['table_id'])
 
             available_tables_count = sum(
                 1 for t in candidate_tables if t.id not in booked_tables_in_slot
@@ -206,13 +314,15 @@ class BookingService:
     @classmethod
     def find_best_available_table(cls, restaurant, booking_date, start_time, end_time, guest_count, zone_name=None):
         """
-        Smart table auto-assignment: finds an unreserved table with capacity >= guest_count,
-        minimizing excess seats (optimal fit), optionally within a preferred zone.
+        Smart table auto-assignment: finds an unreserved table fitting min_capacity <= guests <= capacity,
+        ordering by tightest fit first (capacity - guest_count ascending).
         """
+        buffer_mins = restaurant.turnover_buffer_minutes
         qs = RestaurantTable.objects.filter(
             restaurant=restaurant,
             is_active=True,
             capacity__gte=guest_count,
+            min_capacity__lte=guest_count,
             operational_status__in=[
                 RestaurantTable.OperationalStatus.AVAILABLE,
                 RestaurantTable.OperationalStatus.OCCUPIED,
@@ -222,25 +332,10 @@ class BookingService:
         if zone_name:
             qs = qs.filter(zone_name__iexact=zone_name.strip())
 
-        # Order by capacity ascending to pick the tightest matching table
         candidates = list(qs.order_by('capacity', 'table_number'))
 
-        active_statuses = [
-            Booking.BookingStatus.PENDING,
-            Booking.BookingStatus.CONFIRMED,
-            Booking.BookingStatus.CHECKED_IN,
-        ]
-
-        conflicting_table_ids = set(Booking.objects.filter(
-            restaurant=restaurant,
-            booking_date=booking_date,
-            booking_status__in=active_statuses,
-            start_time__lt=end_time,
-            end_time__gt=start_time,
-        ).values_list('table_id', flat=True))
-
         for table in candidates:
-            if table.id not in conflicting_table_ids:
+            if not cls.check_table_conflict(table.id, booking_date, start_time, end_time, buffer_minutes=buffer_mins):
                 return table
 
         return None
@@ -248,20 +343,31 @@ class BookingService:
     @classmethod
     def create_reservation(cls, customer, hotel, restaurant, table_id, booking_date, start_time, end_time, guest_count, customer_info=None, special_requests='', created_by=None, zone_name=None):
         """
-        Atomic reservation creation with row-level locking (select_for_update) on the table.
-        Auto-assigns best available table if table_id is None.
+        Atomic reservation creation with row-level locking (select_for_update),
+        buffer-aware collision checks, customer anti-spam collision checks, and capacity validations.
         """
-        if start_time >= end_time:
-            raise ValidationError("End time must be after start time.")
+        cls.validate_reservation_time(restaurant, booking_date, start_time, end_time)
 
-        cls.validate_operating_hours(restaurant, booking_date, start_time, end_time)
+        customer_name = customer_info.get('name') if customer_info else (customer.get_full_name() or customer.username if customer else 'Guest')
+        customer_email = customer_info.get('email') if customer_info else (customer.email if customer else '')
+        customer_phone = customer_info.get('phone', '') if customer_info else (getattr(customer, 'phone_number', '') or '')
+
+        if not customer_name:
+            raise ValidationError("Customer name is required.")
+        if not customer_email:
+            raise ValidationError("Customer email is required.")
+
+        # Check customer concurrent overlapping booking
+        if cls.check_customer_conflict(customer, customer_email, booking_date, start_time, end_time):
+            raise ValidationError("You already have an active reservation for an overlapping time slot.")
+
+        buffer_mins = restaurant.turnover_buffer_minutes
 
         with transaction.atomic():
             if not table_id:
-                # Auto-assign table
                 table = cls.find_best_available_table(restaurant, booking_date, start_time, end_time, guest_count, zone_name)
                 if not table:
-                    raise ValidationError("No tables are currently available for this party size and time slot.")
+                    raise ValidationError("No tables are currently available for this party size and time slot (taking turnover buffers into account).")
                 table = RestaurantTable.objects.select_for_update().get(id=table.id)
             else:
                 try:
@@ -269,27 +375,17 @@ class BookingService:
                 except RestaurantTable.DoesNotExist:
                     raise ValidationError("Specified table does not exist in this restaurant.")
 
-            if not table.is_active:
-                raise ValidationError(f"Table {table.table_number} is currently inactive.")
+            if not table.is_active or table.operational_status in [RestaurantTable.OperationalStatus.MAINTENANCE, RestaurantTable.OperationalStatus.TEMPORARILY_BLOCKED]:
+                raise ValidationError(f"Table {table.table_number} is currently out of service or inactive.")
 
-            if guest_count > table.capacity:
+            # Validate capacity boundaries
+            cls.validate_capacity(table, guest_count)
+
+            # Check table conflict with turnover cleaning buffer
+            if cls.check_table_conflict(table.id, booking_date, start_time, end_time, buffer_minutes=buffer_mins):
                 raise ValidationError(
-                    f"Party size ({guest_count}) exceeds capacity of Table {table.table_number} ({table.capacity})."
+                    f"Table {table.table_number} already has a conflicting reservation or is in turnover cleaning during this time slot."
                 )
-
-            if cls.check_table_conflict(table.id, booking_date, start_time, end_time):
-                raise ValidationError(
-                    f"Table {table.table_number} already has a conflicting reservation for this time slot."
-                )
-
-            customer_name = customer_info.get('name') if customer_info else (customer.get_full_name() or customer.username if customer else 'Guest')
-            customer_email = customer_info.get('email') if customer_info else (customer.email if customer else '')
-            customer_phone = customer_info.get('phone', '') if customer_info else (getattr(customer, 'phone_number', '') or '')
-
-            if not customer_name:
-                raise ValidationError("Customer name is required.")
-            if not customer_email:
-                raise ValidationError("Customer email is required.")
 
             booking = Booking.objects.create(
                 customer=customer if customer and customer.is_authenticated else None,
@@ -307,7 +403,6 @@ class BookingService:
                 booking_status=Booking.BookingStatus.CONFIRMED,
             )
 
-            # Audit & History
             BookingHistory.objects.create(
                 booking=booking,
                 changed_by=created_by or (customer if customer and customer.is_authenticated else None),
@@ -325,7 +420,6 @@ class BookingService:
                 reason=f"Booking created ({booking.booking_reference}) for {customer_name}"
             )
 
-            # Notifications
             _send_notification(
                 recipient=customer if customer and customer.is_authenticated else None,
                 hotel=hotel,
@@ -338,9 +432,7 @@ class BookingService:
 
     @classmethod
     def cancel_reservation(cls, booking, cancelled_by, reason=''):
-        """
-        Cancels an existing reservation and logs history and notifications.
-        """
+        """Cancels an existing reservation and logs history and notifications."""
         if booking.booking_status in [Booking.BookingStatus.CANCELLED, Booking.BookingStatus.COMPLETED]:
             raise ValidationError(f"Cannot cancel a booking that is already {booking.get_booking_status_display().lower()}.")
 
@@ -386,7 +478,6 @@ class BookingService:
         booking.booking_status = Booking.BookingStatus.CHECKED_IN
         booking.save(update_fields=['booking_status', 'updated_at'])
 
-        # Update table operational condition
         table = booking.table
         old_table_status = table.operational_status
         table.operational_status = RestaurantTable.OperationalStatus.OCCUPIED
