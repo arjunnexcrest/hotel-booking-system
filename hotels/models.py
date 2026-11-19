@@ -1,5 +1,6 @@
 from django.db import models
 from django.conf import settings
+from django.utils.text import slugify
 from core.models import TimeStampedModel
 
 
@@ -34,6 +35,10 @@ class Hotel(TimeStampedModel):
     country = models.CharField(max_length=100, default='India')
     latitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
     longitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
+    star_rating = models.PositiveSmallIntegerField(null=True, blank=True)
+    amenities = models.JSONField(default=list, blank=True)
+    check_in_time = models.TimeField(default='14:00', null=True, blank=True)
+    check_out_time = models.TimeField(default='11:00', null=True, blank=True)
 
     status = models.CharField(
         max_length=30,
@@ -51,6 +56,17 @@ class Hotel(TimeStampedModel):
 
     def __str__(self):
         return f"{self.name} ({self.get_status_display()})"
+
+    def save(self, *args, **kwargs):
+        if not self.slug:
+            base_slug = slugify(self.name) or 'hotel'
+            slug = base_slug
+            counter = 1
+            while Hotel.objects.filter(slug=slug).exclude(pk=self.pk).exists():
+                slug = f"{base_slug}-{counter}"
+                counter += 1
+            self.slug = slug
+        super().save(*args, **kwargs)
 
 
 class HotelImage(TimeStampedModel):

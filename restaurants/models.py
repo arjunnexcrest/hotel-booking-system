@@ -1,4 +1,5 @@
 from django.db import models
+from django.utils.text import slugify
 from core.models import TimeStampedModel
 
 
@@ -6,15 +7,38 @@ class Restaurant(TimeStampedModel):
     """
     Dining facility or dining area operating within a hotel.
     """
+    class DressCode(models.TextChoices):
+        CASUAL = 'CASUAL', 'Casual'
+        SMART_CASUAL = 'SMART_CASUAL', 'Smart Casual'
+        FORMAL = 'FORMAL', 'Formal'
+
+    class PriceTier(models.TextChoices):
+        BUDGET = '$', '$ (Budget)'
+        MODERATE = '$$', '$$ (Moderate)'
+        UPSCALE = '$$$', '$$$ (Upscale)'
+        FINE_DINING = '$$$$', '$$$$ (Fine Dining)'
+
     hotel = models.ForeignKey(
         'hotels.Hotel',
         on_delete=models.CASCADE,
         related_name='restaurants'
     )
     name = models.CharField(max_length=255)
-    slug = models.SlugField(max_length=255)
+    slug = models.SlugField(max_length=255, blank=True)
     description = models.TextField(blank=True)
     cuisine_type = models.CharField(max_length=150, blank=True)
+    dress_code = models.CharField(
+        max_length=30,
+        choices=DressCode.choices,
+        default=DressCode.CASUAL,
+    )
+    price_tier = models.CharField(
+        max_length=10,
+        choices=PriceTier.choices,
+        default=PriceTier.MODERATE,
+    )
+    phone_number = models.CharField(max_length=30, blank=True)
+    email = models.EmailField(blank=True)
     is_active = models.BooleanField(default=True)
 
     class Meta:
@@ -26,6 +50,17 @@ class Restaurant(TimeStampedModel):
 
     def __str__(self):
         return f"{self.name} ({self.hotel.name})"
+
+    def save(self, *args, **kwargs):
+        if not self.slug:
+            base_slug = slugify(self.name) or 'restaurant'
+            slug = base_slug
+            counter = 1
+            while Restaurant.objects.filter(hotel=self.hotel, slug=slug).exclude(pk=self.pk).exists():
+                slug = f"{base_slug}-{counter}"
+                counter += 1
+            self.slug = slug
+        super().save(*args, **kwargs)
 
 
 class RestaurantImage(TimeStampedModel):
