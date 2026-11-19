@@ -323,6 +323,11 @@ class BookingService:
             is_active=True,
             capacity__gte=guest_count,
             min_capacity__lte=guest_count,
+            operational_status__in=[
+                RestaurantTable.OperationalStatus.AVAILABLE,
+                RestaurantTable.OperationalStatus.OCCUPIED,
+                RestaurantTable.OperationalStatus.AWAITING_CLEANING,
+            ],
         )
         if zone_name:
             qs = qs.filter(zone_name__iexact=zone_name.strip())
