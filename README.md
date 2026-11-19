@@ -11,7 +11,7 @@ pip install -r requirements.txt
 copy .env.example .env         # or use the provided .env
 python manage.py migrate
 python manage.py runserver
-```
+``
 
 API docs: http://127.0.0.1:8000/api/docs/
 
