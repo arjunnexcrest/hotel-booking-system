@@ -24,6 +24,11 @@ class RestaurantTable(TimeStampedModel):
         VIP = 'VIP', 'VIP Table'
         BAR = 'BAR', 'Bar Counter'
 
+    class TableShape(models.TextChoices):
+        RECTANGULAR = 'RECTANGULAR', 'Rectangular'
+        CIRCULAR = 'CIRCULAR', 'Circular'
+        SQUARE = 'SQUARE', 'Square'
+
     restaurant = models.ForeignKey(
         'restaurants.Restaurant',
         on_delete=models.CASCADE,
@@ -37,7 +42,14 @@ class RestaurantTable(TimeStampedModel):
         choices=TableType.choices,
         default=TableType.STANDARD,
     )
+    shape = models.CharField(
+        max_length=20,
+        choices=TableShape.choices,
+        default=TableShape.RECTANGULAR,
+    )
     zone_name = models.CharField(max_length=100, blank=True)
+    pos_x = models.FloatField(default=0.0)
+    pos_y = models.FloatField(default=0.0)
     description = models.TextField(blank=True)
     operational_status = models.CharField(
         max_length=30,
