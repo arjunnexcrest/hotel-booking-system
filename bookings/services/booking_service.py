@@ -167,8 +167,8 @@ class BookingService:
             slot_start = curr_dt.time()
             slot_end = (curr_dt + slot_duration).time()
 
-            # Skip past slots if booking for today
-            if booking_date == now_dt.date() and curr_dt < now_dt:
+            # Skip past slots if booking for today (compare naive local datetimes safely)
+            if booking_date == now_dt.date() and curr_dt < now_dt.replace(tzinfo=None):
                 curr_dt += timedelta(minutes=30)
                 continue
 
@@ -213,6 +213,11 @@ class BookingService:
             restaurant=restaurant,
             is_active=True,
             capacity__gte=guest_count,
+            operational_status__in=[
+                RestaurantTable.OperationalStatus.AVAILABLE,
+                RestaurantTable.OperationalStatus.OCCUPIED,
+                RestaurantTable.OperationalStatus.AWAITING_CLEANING,
+            ],
         )
         if zone_name:
             qs = qs.filter(zone_name__iexact=zone_name.strip())

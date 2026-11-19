@@ -1,7 +1,8 @@
+from datetime import date, timedelta
 from django.core.management.base import BaseCommand
 from django.contrib.auth import get_user_model
-from django.utils.text import slugify
 from accounts.models import HotelMembership
+from bookings.models import Booking
 from hotels.models import Hotel
 from restaurants.models import Restaurant, OperatingHours
 from tables.models import RestaurantTable
@@ -85,6 +86,8 @@ class Command(BaseCommand):
                 'state': 'Maharashtra',
                 'postal_code': '400021',
                 'country': 'India',
+                'star_rating': 5,
+                'amenities': ['Infinity Pool', 'Valet Parking', 'Rooftop Lounge', 'Free Wi-Fi', 'Spa'],
                 'status': Hotel.Status.APPROVED,
                 'is_active': True,
             }
@@ -115,12 +118,45 @@ class Command(BaseCommand):
                 'state': 'Goa',
                 'postal_code': '403515',
                 'country': 'India',
+                'star_rating': 5,
+                'amenities': ['Private Beach', 'Poolside Bar', 'Live Seafood Grill', 'Airport Shuttle'],
                 'status': Hotel.Status.APPROVED,
                 'is_active': True,
             }
         )
         if created:
             self.stdout.write(self.style.SUCCESS(f'Created Hotel: {hotel2.name}'))
+
+        HotelMembership.objects.get_or_create(
+            user=hotel_owner,
+            hotel=hotel2,
+            role=HotelMembership.MembershipRole.OWNER,
+            defaults={'is_active': True}
+        )
+
+        # 5b. Pending Hotel for Super-Admin Approval Demo
+        pending_hotel, created = Hotel.objects.get_or_create(
+            slug='emerald-crest-heritage',
+            defaults={
+                'name': 'Emerald Crest Heritage Haveli',
+                'owner': hotel_owner,
+                'description': 'Restored royal courtyard property with private dining terraces and artisanal Rajasthani cuisine.',
+                'hotel_type': 'Boutique Heritage Hotel',
+                'email': 'concierge@emeraldcrest.com',
+                'phone': '+91 141 267 8900',
+                'address': 'Civil Lines Heritage Avenue',
+                'city': 'Jaipur',
+                'state': 'Rajasthan',
+                'postal_code': '302006',
+                'country': 'India',
+                'star_rating': 4,
+                'amenities': ['Courtyard Dining', 'Valet Parking', 'Live Folk Music'],
+                'status': Hotel.Status.PENDING_APPROVAL,
+                'is_active': True,
+            }
+        )
+        if created:
+            self.stdout.write(self.style.SUCCESS(f'Created Pending Hotel (for approval demo): {pending_hotel.name}'))
 
         # 6. Restaurant under Grand Azure Palace
         restaurant, created = Restaurant.objects.get_or_create(
@@ -199,5 +235,93 @@ class Command(BaseCommand):
                 'is_active': True,
             }
         )
+
+        HotelMembership.objects.get_or_create(
+            user=staff_user,
+            hotel=hotel,
+            role=HotelMembership.MembershipRole.STAFF,
+            defaults={'is_active': True}
+        )
+
+        # 9. Restaurant & tables under Serena Bay Resort (Goa)
+        rest2, created = Restaurant.objects.get_or_create(
+            hotel=hotel2,
+            slug='coastal-breeze-deck',
+            defaults={
+                'name': 'Coastal Breeze Deck',
+                'description': 'Open-air oceanfront dining specializing in grilled catch of the day and Mediterranean tapas.',
+                'cuisine_type': 'Mediterranean & Seafood',
+                'is_active': True,
+            }
+        )
+        if created:
+            self.stdout.write(self.style.SUCCESS(f'Created Restaurant: {rest2.name}'))
+        for day in range(7):
+            OperatingHours.objects.get_or_create(
+                restaurant=rest2,
+                day_of_week=day,
+                defaults={
+                    'opening_time': '12:00:00',
+                    'closing_time': '23:00:00',
+                    'is_closed': False,
+                }
+            )
+        for num, cap, min_c, t_type, zone in [
+            ('G-01', 2, 1, RestaurantTable.TableType.OUTDOOR, 'Ocean Deck'),
+            ('G-02', 4, 2, RestaurantTable.TableType.OUTDOOR, 'Ocean Deck'),
+            ('G-03', 6, 3, RestaurantTable.TableType.VIP, 'Sunset Cabana'),
+        ]:
+            RestaurantTable.objects.get_or_create(
+                restaurant=rest2,
+                table_number=num,
+                defaults={
+                    'capacity': cap,
+                    'min_capacity': min_c,
+                    'table_type': t_type,
+                    'zone_name': zone,
+                    'operational_status': RestaurantTable.OperationalStatus.AVAILABLE,
+                    'is_active': True,
+                }
+            )
+
+        # 10. Sample upcoming & completed bookings for customer demo
+        first_table = RestaurantTable.objects.filter(restaurant=restaurant, table_number='T-03').first()
+        if first_table:
+            tomorrow = date.today() + timedelta(days=1)
+            yesterday = date.today() - timedelta(days=1)
+            Booking.objects.get_or_create(
+                customer=customer,
+                hotel=hotel,
+                restaurant=restaurant,
+                table=first_table,
+                booking_date=tomorrow,
+                start_time='19:00:00',
+                defaults={
+                    'end_time': '20:30:00',
+                    'guest_count': 4,
+                    'customer_name': 'John Doe',
+                    'customer_email': customer.email,
+                    'customer_phone': customer.phone_number,
+                    'special_requests': 'Anniversary dinner — quiet booth preferred',
+                    'booking_status': Booking.BookingStatus.CONFIRMED,
+                }
+            )
+            Booking.objects.get_or_create(
+                customer=customer,
+                hotel=hotel,
+                restaurant=restaurant,
+                table=first_table,
+                booking_date=yesterday,
+                start_time='13:00:00',
+                defaults={
+                    'end_time': '14:30:00',
+                    'guest_count': 2,
+                    'customer_name': 'John Doe',
+                    'customer_email': customer.email,
+                    'customer_phone': customer.phone_number,
+                    'special_requests': 'Lunch tasting menu',
+                    'booking_status': Booking.BookingStatus.COMPLETED,
+                }
+            )
 
         self.stdout.write(self.style.SUCCESS('=== Demo data seeding completed successfully! ==='))
