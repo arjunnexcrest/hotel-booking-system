@@ -1,4 +1,4 @@
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from django.db import models
 from django.core.exceptions import PermissionDenied, ValidationError as DjangoValidationError
 from django.utils import timezone
@@ -124,6 +124,7 @@ class BookingViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'])
     def check_availability(self, request):
         """Check specific table availability for date, start_time, and end_time."""
+        
         restaurant_id = request.query_params.get('restaurant')
         booking_date = request.query_params.get('date')
         start_time = request.query_params.get('start_time')
@@ -195,7 +196,7 @@ class BookingViewSet(viewsets.ModelViewSet):
             'start_time': start_time,
             'end_time': end_time,
             'guests': guests,
-            'available_count': available_tables.count(),
+            'available_count': len(available_tables),
             'tables': serializer.data
         })
 
